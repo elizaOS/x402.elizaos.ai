@@ -11,6 +11,8 @@ A modern Express-based API Gateway with dynamic routing, content negotiation, an
 - 🔀 **Content Negotiation** - Serves HTML product pages or JSON data based on Accept headers
 - 🔗 **Upstream Proxy** - Transparent proxying to upstream services
 - 🎨 **Beautiful UI** - Modern, responsive HTML documentation pages
+- 💳 **Web3 Wallet Support** - Phantom wallet integration for x402 payments on Solana
+- 🔐 **Payment Verification** - On-chain verification of Solana transactions
 - 🔒 **Security** - Helmet.js for security headers
 - 🌐 **CORS** - Cross-Origin Resource Sharing enabled
 - 📝 **Logging** - Morgan HTTP request logger
@@ -380,6 +382,7 @@ x402/
 - **index.js** - Express server with content negotiation and dynamic routing
 - **agents.js** - Data-driven configuration for all agents and endpoints (**Edit this to add endpoints!**)
 - **templates.js** - HTML page generators for beautiful documentation
+- **public/wallet-connector.js** - Client-side wallet connector for Phantom integration (for x402-enabled upstreams)
 - **ecosystem.config.cjs** - PM2 process manager configuration
 - **package.json** - Dependencies and npm scripts
 - **AGENT_STRUCTURE.md** - Detailed guide for configuring agents with baseUrl
@@ -397,6 +400,52 @@ View logs in real-time:
 ```bash
 pm2 logs express-bun-server
 ```
+
+## Web3 Wallet Integration
+
+The gateway provides a client-side wallet connector to help users interact with x402-enabled upstream services.
+
+### How It Works
+
+1. **Upstream Services**: Your upstream APIs may implement the x402 payment protocol
+2. **Client Wallet**: Users can connect their Phantom wallet via the gateway's UI
+3. **Payment Flow**: 
+   - User requests an endpoint
+   - If upstream returns 402 Payment Required, payment details are shown
+   - User pays the upstream service directly using their wallet
+   - Gateway forwards the request with payment proof headers
+   - Upstream validates payment and returns data
+
+### Quick Start
+
+1. **Install Phantom Wallet** (for users):
+   - Visit https://phantom.app/
+   - Install browser extension
+   - Create or import a wallet
+
+2. **Get Test SOL** (for devnet testing):
+   - Visit https://solfaucet.com/
+   - Request devnet SOL
+   - Or use: `solana airdrop 1 YOUR_ADDRESS --url devnet`
+
+3. **Use the UI**:
+   - Navigate to any endpoint page in your browser
+   - Connect Phantom Wallet if the upstream requires payment
+   - Pay the upstream service to access protected endpoints
+
+### Features
+
+- 💳 **Phantom Wallet Support** - Seamless browser wallet integration
+- ⛓️ **Multi-Network** - Support for mainnet, devnet, and testnet
+- 🔐 **Cryptographic Proofs** - Sign and verify payment messages
+- 📡 **x402 Headers** - Automatic payment header management
+- 🔄 **Transparent Proxy** - Gateway forwards payment headers to upstream services
+
+### Documentation
+
+The wallet connector is purely client-side and helps users make payments to x402-enabled upstream services. The gateway acts as a transparent proxy, forwarding payment headers from the client to the upstream for verification.
+
+**Note**: Payment verification is handled by the upstream services, not by this gateway.
 
 ## Performance
 
