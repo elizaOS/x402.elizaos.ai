@@ -25,9 +25,14 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "express": "^4.18.2",
-    "dotenv": "^16.3.1",
+    "@solana/wallet-adapter-base": "^0.9.27",
+    "@solana/wallet-adapter-phantom": "^0.9.28",
+    "@solana/wallet-adapter-wallets": "^0.19.37",
+    "@solana/web3.js": "^1.98.4",
+    "bs58": "^6.0.0",
     "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
     "helmet": "^7.1.0",
     "morgan": "^1.10.0"
   },
@@ -35,4 +40,3 @@
     "pm2": "^5.3.0"
   }
 }
-
