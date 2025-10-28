@@ -3,8 +3,14 @@ import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import dotenv from 'dotenv';
+import { readFileSync } from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { getAllAgents, getAgentById, getEndpointByPath, getAllEndpoints, buildUpstreamUrl, getAgentGroups } from './agents.js';
 import { generateEndpointPage, generateAgentsListPage, generateAgentDetailPage } from './templates.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Load environment variables from .env file
 const envResult = dotenv.config();
@@ -48,10 +54,23 @@ app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'"],
+      scriptSrc: [
+        "'self'", 
+        "'unsafe-inline'", 
+        "https://unpkg.com",
+        "https://cdn.jsdelivr.net"
+      ],
+      scriptSrcAttr: ["'unsafe-inline'"], // Allow inline event handlers (onclick, onchange, etc.)
       styleSrc: ["'self'", "'unsafe-inline'"],
       imgSrc: ["'self'", "data:", "https:"],
-      connectSrc: ["'self'"],
+      connectSrc: [
+        "'self'",
+        "https://api.mainnet-beta.solana.com",
+        "https://api.devnet.solana.com",
+        "https://api.testnet.solana.com",
+        "https://unpkg.com",
+        "https://cdn.jsdelivr.net"
+      ],
       fontSrc: ["'self'", "https:", "data:"],
       objectSrc: ["'none'"],
       mediaSrc: ["'self'"],
@@ -60,6 +79,7 @@ app.use(helmet({
   },
 })); // Security headers
 app.use(cors()); // Enable CORS
+app.use('/public', express.static(path.join(__dirname, 'public'))); // Serve static files
 
 // Custom morgan token for real client IP
 morgan.token('client-ip', (req) => getClientIp(req));
@@ -78,7 +98,7 @@ function wantsHtml(req) {
 }
 
 // Helper function to proxy request to upstream
-async function proxyToUpstream(upstreamUrl, method, queryParams, body) {
+async function proxyToUpstream(upstreamUrl, method, queryParams, body, incomingHeaders = {}) {
   try {
     // Build URL with query parameters
     const url = new URL(upstreamUrl);
@@ -86,12 +106,51 @@ async function proxyToUpstream(upstreamUrl, method, queryParams, body) {
       url.searchParams.append(key, queryParams[key]);
     });
 
+    // Forward relevant headers from the incoming request
+    const forwardHeaders = {
+      'User-Agent': 'X402-Gateway/1.0'
+    };
+
+    // Headers to forward from client (case-insensitive)
+    const headersToForward = [
+      'authorization',
+      'accept',
+      'accept-language',
+      'accept-encoding',
+      'content-type',
+      'x-requested-with',
+      'x-api-key',
+      'x-client-id',
+      // x402-specific payment headers
+      'x-payment-id',
+      'x-payment-proof',
+      'x-payment-signature',
+      'x-payment-timestamp',
+      'x-payment-hash',
+      'x-payment-network',
+      'x-payment-amount'
+    ];
+
+    // Copy headers from incoming request
+    for (const [key, value] of Object.entries(incomingHeaders)) {
+      const lowerKey = key.toLowerCase();
+      if (headersToForward.includes(lowerKey)) {
+        forwardHeaders[key] = value;
+      }
+      // Also forward any custom x- headers
+      else if (lowerKey.startsWith('x-')) {
+        forwardHeaders[key] = value;
+      }
+    }
+
+    // Ensure Content-Type is set for POST requests
+    if (method === 'POST' && !forwardHeaders['Content-Type'] && !forwardHeaders['content-type']) {
+      forwardHeaders['Content-Type'] = 'application/json';
+    }
+
     const options = {
       method: method,
-      headers: {
-        'Content-Type': 'application/json',
-        'User-Agent': 'X402-Gateway/1.0'
-      }
+      headers: forwardHeaders
     };
 
     if (method === 'POST' && body) {
@@ -115,6 +174,199 @@ async function proxyToUpstream(upstreamUrl, method, queryParams, body) {
     };
   }
 }
+
+// Favicon endpoint
+app.get('/favicon.ico', (req, res) => {
+  try {
+    const favicon = readFileSync('./favicon.svg');
+    res.setHeader('Content-Type', 'image/svg+xml');
+    res.setHeader('Cache-Control', 'public, max-age=86400'); // Cache for 1 day
+    res.send(favicon);
+  } catch (error) {
+    res.status(404).send('Favicon not found');
+  }
+});
+
+// Validation helper functions for x402 schema
+function validateBasicX402Schema(data) {
+  try {
+    // Basic x402 validation - minimal requirements for most clients
+    if (typeof data !== 'object' || data === null) {
+      return { valid: false, errors: ['Response must be an object'] };
+    }
+
+    const errors = [];
+
+    // Check x402Version exists and is a number
+    if (typeof data.x402Version !== 'number') {
+      errors.push('x402Version must be a number');
+    }
+
+    // If accepts exists, it should be an array
+    if (data.accepts !== undefined) {
+      if (!Array.isArray(data.accepts)) {
+        errors.push('accepts must be an array');
+      } else {
+        // Check each accepts item has minimal fields
+        data.accepts.forEach((item, idx) => {
+          if (typeof item !== 'object' || item === null) {
+            errors.push(`accepts[${idx}] must be an object`);
+          } else {
+            // Minimal fields check
+            if (!item.resource) errors.push(`accepts[${idx}].resource is required`);
+            if (!item.payTo) errors.push(`accepts[${idx}].payTo is required`);
+          }
+        });
+      }
+    }
+
+    return { valid: errors.length === 0, errors };
+  } catch (e) {
+    return { valid: false, errors: [e.message] };
+  }
+}
+
+function validateStrictX402ScanSchema(data) {
+  try {
+    // Strict x402scan.com validation
+    if (typeof data !== 'object' || data === null) {
+      return { valid: false, errors: ['Response must be an object'] };
+    }
+
+    const errors = [];
+
+    // Check x402Version
+    if (typeof data.x402Version !== 'number') {
+      errors.push('x402Version must be a number');
+    }
+
+    // accepts must exist and be an array
+    if (!data.accepts) {
+      errors.push('accepts array is required for x402scan.com');
+    } else if (!Array.isArray(data.accepts)) {
+      errors.push('accepts must be an array');
+    } else if (data.accepts.length === 0) {
+      errors.push('accepts array cannot be empty for x402scan.com');
+    } else {
+      // Strict validation for each accepts item
+      data.accepts.forEach((item, idx) => {
+        if (typeof item !== 'object' || item === null) {
+          errors.push(`accepts[${idx}] must be an object`);
+          return;
+        }
+
+        // All required fields for x402scan.com
+        const requiredFields = {
+          scheme: 'string',
+          network: 'string',
+          maxAmountRequired: 'string',
+          resource: 'string',
+          description: 'string',
+          mimeType: 'string',
+          payTo: 'string',
+          maxTimeoutSeconds: 'number',
+          asset: 'string'
+        };
+
+        for (const [field, expectedType] of Object.entries(requiredFields)) {
+          if (item[field] === undefined || item[field] === null) {
+            errors.push(`accepts[${idx}].${field} is required for x402scan.com`);
+          } else if (typeof item[field] !== expectedType) {
+            errors.push(`accepts[${idx}].${field} must be a ${expectedType}, got ${typeof item[field]}`);
+          }
+        }
+
+        // Validate scheme is exactly "exact"
+        if (item.scheme && item.scheme !== 'exact') {
+          errors.push(`accepts[${idx}].scheme must be "exact" for x402scan.com, got "${item.scheme}"`);
+        }
+
+        // Validate network is a known network (base, solana, ethereum, etc.)
+        const validNetworks = ['base', 'solana', 'ethereum', 'polygon', 'arbitrum', 'optimism'];
+        if (item.network && !validNetworks.includes(item.network.toLowerCase())) {
+          errors.push(`accepts[${idx}].network must be a valid network (e.g., base, solana, ethereum), got "${item.network}"`);
+        }
+
+        // Validate outputSchema structure if present
+        if (item.outputSchema !== undefined) {
+          if (typeof item.outputSchema !== 'object' || item.outputSchema === null) {
+            errors.push(`accepts[${idx}].outputSchema must be an object if provided`);
+          } else if (item.outputSchema.input) {
+            const input = item.outputSchema.input;
+            if (input.type !== 'http') {
+              errors.push(`accepts[${idx}].outputSchema.input.type must be "http"`);
+            }
+            if (input.method && !['GET', 'POST'].includes(input.method)) {
+              errors.push(`accepts[${idx}].outputSchema.input.method must be "GET" or "POST"`);
+            }
+            if (input.bodyType && !['json', 'form-data', 'multipart-form-data', 'text', 'binary'].includes(input.bodyType)) {
+              errors.push(`accepts[${idx}].outputSchema.input.bodyType must be one of: json, form-data, multipart-form-data, text, binary`);
+            }
+          }
+        }
+
+        // Validate extra is an object if present
+        if (item.extra !== undefined && (typeof item.extra !== 'object' || item.extra === null || Array.isArray(item.extra))) {
+          errors.push(`accepts[${idx}].extra must be a plain object if provided`);
+        }
+      });
+    }
+
+    return { valid: errors.length === 0, errors };
+  } catch (e) {
+    return { valid: false, errors: [e.message] };
+  }
+}
+
+// Test/validate x402 JSON endpoint
+app.post('/test', express.json(), (req, res) => {
+  const { url, data } = req.body;
+
+  // If URL is provided, fetch and validate
+  if (url) {
+    fetch(url)
+      .then(response => response.json())
+      .then(jsonData => {
+        const basicValidation = validateBasicX402Schema(jsonData);
+        const strictValidation = validateStrictX402ScanSchema(jsonData);
+
+        res.json({
+          isBasicValid: basicValidation.valid,
+          isStrictValid: strictValidation.valid,
+          basicErrors: basicValidation.errors,
+          strictErrors: strictValidation.errors,
+          data: jsonData
+        });
+      })
+      .catch(error => {
+        res.status(400).json({
+          isBasicValid: false,
+          isStrictValid: false,
+          error: `Failed to fetch or parse JSON from URL: ${error.message}`
+        });
+      });
+  } else if (data) {
+    // Validate provided data directly
+    const basicValidation = validateBasicX402Schema(data);
+    const strictValidation = validateStrictX402ScanSchema(data);
+
+    res.json({
+      isBasicValid: basicValidation.valid,
+      isStrictValid: strictValidation.valid,
+      basicErrors: basicValidation.errors,
+      strictErrors: strictValidation.errors,
+      data: data
+    });
+  } else {
+    res.status(400).json({
+      error: 'Must provide either "url" or "data" in request body',
+      usage: {
+        byUrl: { url: 'https://example.com/api/endpoint' },
+        byData: { data: { x402Version: 1, accepts: [] } }
+      }
+    });
+  }
+});
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -141,6 +393,7 @@ app.get('/', (req, res) => {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/svg+xml" href="/favicon.ico">
     <title>X402 API Gateway</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -406,6 +659,11 @@ app.get('/', (req, res) => {
                 </div>
 
                 <div class="form-group">
+                    <label for="queryParams">Query Parameters (e.g., ?param1=value1&param2=value2)</label>
+                    <input type="text" id="queryParams" placeholder="?key=value&another=value" style="width: 100%;">
+                </div>
+
+                <div class="form-group">
                     <label for="rateLimitInput">Rate Limit (requests per minute)</label>
                     <input type="number" id="rateLimitInput" value="10" min="1" max="60">
                 </div>
@@ -428,8 +686,88 @@ app.get('/', (req, res) => {
                     <span class="info">Ready to test endpoints. Select an endpoint and click "Test Endpoint".</span>
                 </div>
             </div>
+            
+            <div style="margin-top: 30px; padding-top: 30px; border-top: 2px solid #e0e0e0;">
+                <h3 style="font-size: 24px; margin-bottom: 10px;">💳 Web3 Wallet Connector</h3>
+                <p class="description">Connect your wallet to make real x402 payments (Solana or EVM chains)</p>
+            
+            <div id="home-wallet-status" style="background: #f3f4f6; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
+                <div style="display: flex; align-items: center; gap: 15px;">
+                    <div style="font-size: 32px;">👛</div>
+                    <div style="flex: 1;">
+                        <div style="font-weight: 600; margin-bottom: 5px;">
+                            <span id="home-wallet-type" style="color: #667eea;"></span>
+                            <span id="home-wallet-status-text">Not Connected</span>
+                        </div>
+                        <div style="font-size: 14px; color: #666;" id="home-wallet-address"></div>
+                        <div style="font-size: 12px; color: #888; margin-top: 5px;" id="home-wallet-chain"></div>
+                    </div>
+                </div>
+            </div>
+            
+            <div id="wallet-selection" style="margin-bottom: 20px;">
+                <div style="font-weight: 600; margin-bottom: 10px; color: #333;">Choose Your Wallet:</div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                    <button id="home-connect-phantom-btn" class="cta-button" style="background: linear-gradient(135deg, #9945FF 0%, #14F195 100%);">
+                        🟣 Phantom (Solana)
+                    </button>
+                    <button id="home-connect-metamask-btn" class="cta-button" style="background: linear-gradient(135deg, #F6851B 0%, #E2761B 100%);">
+                        🦊 MetaMask (EVM)
+                    </button>
+                </div>
+            </div>
+            
+            <div id="disconnect-section" style="display: none; margin-bottom: 20px;">
+                <button id="home-disconnect-wallet-btn" class="cta-button" style="width: 100%; background: #dc3545;">
+                    ❌ Disconnect Wallet
+                </button>
+            </div>
+            
+            <div id="home-wallet-info" style="display: none;">
+                <div style="background: #dbeafe; border-left: 4px solid #3b82f6; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
+                    <div style="font-weight: 600; color: #1e3a8a; margin-bottom: 5px;">✅ Wallet Connected</div>
+                    <div style="color: #1e40af; font-size: 14px; margin-bottom: 10px;">
+                        Your wallet is now connected and ready to make x402 payments.
+                    </div>
+                    <div style="font-family: 'Monaco', monospace; font-size: 13px;">
+                        <div><strong>Public Key:</strong> <span id="home-wallet-pubkey" style="word-break: break-all;"></span></div>
+                        <div><strong>Network:</strong> <span id="home-wallet-network">devnet</span></div>
+                    </div>
+                </div>
+                
+                <div style="background: #f3f4f6; padding: 15px; border-radius: 8px;">
+                    <div style="font-weight: 600; margin-bottom: 10px;">💡 Next Steps:</div>
+                    <ol style="margin-left: 20px; color: #666; font-size: 14px; line-height: 1.8;">
+                        <li>Browse available <a href="/agents" style="color: #667eea; text-decoration: underline;">agents and endpoints</a></li>
+                        <li>Visit any endpoint page to see payment details</li>
+                        <li>Use the wallet connector on each page to make payments</li>
+                        <li>Access protected content with your payments!</li>
+                    </ol>
+                </div>
+            </div>
+            
+            <div id="home-install-phantom" style="display: none; background: #fee2e2; border-left: 4px solid #ef4444; padding: 15px; border-radius: 8px;">
+                <div style="font-weight: 600; color: #991b1b; margin-bottom: 5px;">⚠️ Phantom Wallet Not Detected</div>
+                <div style="color: #7f1d1d; font-size: 14px; margin-bottom: 10px;">
+                    Please install Phantom wallet to connect and make Web3 payments.
+                </div>
+                <a href="https://phantom.app/" target="_blank" rel="noopener" class="cta-button" style="display: inline-block; text-decoration: none; margin-top: 10px;">
+                    Download Phantom Wallet →
+                </a>
+            </div>
+            </div>
         </div>
     </div>
+
+    <!-- Load wallet connectors -->
+    <script src="/public/wallet-connector.js"></script>
+    <script src="/public/evm-wallet-connector.js"></script>
+    <script>
+      console.log('✅ Solana wallet connector loaded');
+      console.log('✅ EVM wallet connector loaded');
+      console.log('Phantom available:', typeof window.solana !== 'undefined');
+      console.log('MetaMask available:', typeof window.ethereum !== 'undefined');
+    </script>
 
     <script>
         let requestQueue = [];
@@ -499,7 +837,13 @@ app.get('/', (req, res) => {
                     log(\`Response: \${JSON.stringify(data).substring(0, 200)}...\`, 'info');
                 } else {
                     log(\`✗ ERROR [\${method}] \${endpoint} - Status: \${response.status}\`, 'error');
-                    log(\`Error: \${JSON.stringify(data)}\`, 'error');
+                    log(\`Response: \${JSON.stringify(data).substring(0, 200)}...\`, 'info');
+                    
+                    // If it's a 402 Payment Required, validate the x402 schema
+                    if (response.status === 402 && data.x402Version !== undefined) {
+                        log(\`🔍 Detected x402 response, validating schema...\`, 'info');
+                        await validateX402Response(data);
+                    }
                 }
                 
                 requestCount++;
@@ -509,6 +853,37 @@ app.get('/', (req, res) => {
                 log(\`✗ FAILED [\${method}] \${endpoint} - \${error.message}\`, 'error');
                 requestCount++;
                 updateStats();
+            }
+        }
+
+        async function validateX402Response(data) {
+            try {
+                const validationResponse = await fetch('/test', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ data })
+                });
+
+                const validation = await validationResponse.json();
+                
+                // Display validation results
+                if (validation.isBasicValid && validation.isStrictValid) {
+                    log(\`✓ VALIDATION: ✅ Basic x402 ✅ x402scan.com strict\`, 'success');
+                } else if (validation.isBasicValid) {
+                    log(\`✓ VALIDATION: ✅ Basic x402 ❌ x402scan.com strict\`, 'info');
+                    if (validation.strictErrors.length > 0) {
+                        log(\`  Strict errors: \${validation.strictErrors.join(', ')}\`, 'error');
+                    }
+                } else {
+                    log(\`✗ VALIDATION: ❌ Basic x402 ❌ x402scan.com strict\`, 'error');
+                    if (validation.basicErrors.length > 0) {
+                        log(\`  Basic errors: \${validation.basicErrors.join(', ')}\`, 'error');
+                    }
+                }
+            } catch (error) {
+                log(\`⚠️ Validation failed: \${error.message}\`, 'error');
             }
         }
 
@@ -586,6 +961,15 @@ app.get('/', (req, res) => {
                 method = select.options[select.selectedIndex].dataset.method;
             }
             
+            // Add query parameters if provided
+            const queryParams = document.getElementById('queryParams').value.trim();
+            if (queryParams) {
+                // Remove leading ? if present
+                const cleanParams = queryParams.startsWith('?') ? queryParams.substring(1) : queryParams;
+                // Check if endpoint already has query parameters
+                endpoint = endpoint + (endpoint.includes('?') ? '&' : '?') + cleanParams;
+            }
+            
             log(\`📋 Adding to queue: [\${method}] \${endpoint}\`, 'info');
             requestQueue.push({ endpoint, method });
             updateStats();
@@ -615,6 +999,147 @@ app.get('/', (req, res) => {
 
         // Initialize stats
         updateStats();
+        
+        // Home page wallet connector
+        const homeConnectPhantomBtn = document.getElementById('home-connect-phantom-btn');
+        const homeConnectMetaMaskBtn = document.getElementById('home-connect-metamask-btn');
+        const homeDisconnectBtn = document.getElementById('home-disconnect-wallet-btn');
+        const homeStatusText = document.getElementById('home-wallet-status-text');
+        const homeWalletType = document.getElementById('home-wallet-type');
+        const homeWalletAddress = document.getElementById('home-wallet-address');
+        const homeWalletChain = document.getElementById('home-wallet-chain');
+        const homeWalletInfo = document.getElementById('home-wallet-info');
+        const homeInstallPhantom = document.getElementById('home-install-phantom');
+        const homeWalletPubkey = document.getElementById('home-wallet-pubkey');
+        const walletSelection = document.getElementById('wallet-selection');
+        const disconnectSection = document.getElementById('disconnect-section');
+        
+        let currentWalletType = null; // 'solana' or 'evm'
+        
+        // Check if wallet connector is available
+        function checkHomePhantom() {
+            if (typeof window.walletConnector === 'undefined') {
+                console.log('Waiting for wallet connector to load...');
+                setTimeout(checkHomePhantom, 100);
+                return;
+            }
+            
+            if (!window.walletConnector.isPhantomInstalled()) {
+                homeInstallPhantom.style.display = 'block';
+                homeConnectBtn.disabled = true;
+                homeConnectBtn.style.opacity = '0.5';
+                homeConnectBtn.style.cursor = 'not-allowed';
+            }
+        }
+        
+        function updateHomeWalletUI(connected, type = null) {
+            if (connected) {
+                homeStatusText.textContent = 'Connected';
+                homeStatusText.style.color = '#10b981';
+                walletSelection.style.display = 'none';
+                disconnectSection.style.display = 'block';
+                homeWalletInfo.style.display = 'block';
+                
+                if (type === 'solana') {
+                    homeWalletType.textContent = '🟣 Phantom (Solana) - ';
+                    homeWalletAddress.textContent = window.walletConnector.publicKey;
+                    homeWalletPubkey.textContent = window.walletConnector.publicKey;
+                    homeWalletChain.textContent = 'Network: Solana';
+                } else if (type === 'evm') {
+                    const connector = window.evmWalletConnector;
+                    homeWalletType.textContent = '🦊 ' + connector.getWalletName() + ' (EVM) - ';
+                    homeWalletAddress.textContent = connector.address;
+                    homeWalletPubkey.textContent = connector.address;
+                    homeWalletChain.textContent = 'Network: ' + connector.chainName + ' (Chain ID: ' + connector.chainId + ')';
+                }
+            } else {
+                homeStatusText.textContent = 'Not Connected';
+                homeStatusText.style.color = '#666';
+                homeWalletType.textContent = '';
+                homeWalletAddress.textContent = '';
+                homeWalletChain.textContent = '';
+                walletSelection.style.display = 'block';
+                disconnectSection.style.display = 'none';
+                homeWalletInfo.style.display = 'none';
+                currentWalletType = null;
+            }
+        }
+        
+        // Connect Phantom (Solana)
+        homeConnectPhantomBtn.addEventListener('click', async function() {
+            if (typeof window.walletConnector === 'undefined') {
+                alert('Wallet connector not loaded. Please refresh the page.');
+                return;
+            }
+            
+            homeConnectPhantomBtn.disabled = true;
+            const originalText = homeConnectPhantomBtn.textContent;
+            homeConnectPhantomBtn.textContent = '🔄 Connecting...';
+            
+            log('🔄 Attempting to connect to Phantom wallet...', 'info');
+            
+            const diagnostics = window.walletConnector.getDiagnostics();
+            console.log('Phantom Diagnostics:', diagnostics);
+            
+            const result = await window.walletConnector.connectPhantom();
+            
+            if (result.success) {
+                currentWalletType = 'solana';
+                updateHomeWalletUI(true, 'solana');
+                log('✅ Phantom connected: ' + result.publicKey, 'success');
+            } else {
+                log('❌ Failed to connect: ' + result.error, 'error');
+                alert(result.error);
+                homeConnectPhantomBtn.disabled = false;
+                homeConnectPhantomBtn.textContent = originalText;
+            }
+        });
+        
+        // Connect MetaMask (EVM)
+        homeConnectMetaMaskBtn.addEventListener('click', async function() {
+            if (typeof window.evmWalletConnector === 'undefined') {
+                alert('EVM wallet connector not loaded. Please refresh the page.');
+                return;
+            }
+            
+            homeConnectMetaMaskBtn.disabled = true;
+            const originalText = homeConnectMetaMaskBtn.textContent;
+            homeConnectMetaMaskBtn.textContent = '🔄 Connecting...';
+            
+            log('🔄 Attempting to connect to MetaMask/EVM wallet...', 'info');
+            
+            const diagnostics = window.evmWalletConnector.getDiagnostics();
+            console.log('EVM Wallet Diagnostics:', diagnostics);
+            
+            const result = await window.evmWalletConnector.connect();
+            
+            if (result.success) {
+                currentWalletType = 'evm';
+                updateHomeWalletUI(true, 'evm');
+                log('✅ ' + result.walletName + ' connected: ' + result.address, 'success');
+                log('Chain: ' + result.chainName + ' (' + result.chainId + ')', 'info');
+            } else {
+                log('❌ Failed to connect: ' + result.error, 'error');
+                alert(result.error);
+                homeConnectMetaMaskBtn.disabled = false;
+                homeConnectMetaMaskBtn.textContent = originalText;
+            }
+        });
+        
+        // Disconnect wallet
+        homeDisconnectBtn.addEventListener('click', async function() {
+            if (currentWalletType === 'solana' && typeof window.walletConnector !== 'undefined') {
+                await window.walletConnector.disconnect();
+                log('🔌 Phantom wallet disconnected', 'info');
+            } else if (currentWalletType === 'evm' && typeof window.evmWalletConnector !== 'undefined') {
+                await window.evmWalletConnector.disconnect();
+                log('🔌 EVM wallet disconnected', 'info');
+            }
+            updateHomeWalletUI(false);
+        });
+        
+        // Check Phantom on load
+        checkHomePhantom();
     </script>
 </body>
 </html>`;
@@ -752,7 +1277,8 @@ app.all('*', async (req, res, next) => {
       fullUpstreamUrl,
       req.method,
       queryParams,
-      body
+      body,
+      req.headers
     );
     
     if (proxyResult.success) {

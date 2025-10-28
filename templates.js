@@ -64,6 +64,7 @@ export function generateEndpointPage(agent, endpoint, baseUrl = 'http://localhos
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/svg+xml" href="/favicon.ico">
     <title>${endpoint.name} - ${agent.name}</title>
     <style>
         * {
@@ -460,10 +461,74 @@ const data = await response.json();</pre>
             </div>
         </div>
         
+        <div class="content-card">
+            <h2>💳 Web3 Wallet Payment (x402)</h2>
+            
+            <div id="wallet-status" style="background: #f3f4f6; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
+                <div style="display: flex; align-items: center; gap: 15px;">
+                    <div style="font-size: 32px;">👛</div>
+                    <div style="flex: 1;">
+                        <div style="font-weight: 600; margin-bottom: 5px;">Wallet Status: <span id="wallet-status-text">Not Connected</span></div>
+                        <div style="font-size: 14px; color: #666;" id="wallet-address"></div>
+                    </div>
+                </div>
+            </div>
+            
+            <div style="display: flex; gap: 10px; margin-bottom: 20px;">
+                <button id="connect-phantom-btn" class="try-it" style="flex: 1; text-decoration: none; text-align: center; cursor: pointer; border: none; font-size: 16px;">
+                    🔌 Connect Phantom Wallet
+                </button>
+                <button id="disconnect-wallet-btn" class="try-it" style="flex: 1; text-decoration: none; text-align: center; cursor: pointer; border: none; font-size: 16px; background: #dc3545; display: none;">
+                    ❌ Disconnect
+                </button>
+            </div>
+            
+            <div id="payment-section" style="display: none;">
+                <div style="background: #fef3c7; border-left: 4px solid #f59e0b; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
+                    <div style="font-weight: 600; color: #92400e; margin-bottom: 5px;">💰 Payment Required</div>
+                    <div style="color: #78350f; font-size: 14px;">
+                        This endpoint requires payment via x402 protocol.
+                    </div>
+                    <div style="margin-top: 10px; font-family: 'Monaco', monospace; font-size: 13px;">
+                        <div><strong>Amount:</strong> <span id="payment-amount">-</span></div>
+                        <div><strong>Network:</strong> <span id="payment-network">-</span></div>
+                        <div><strong>Recipient:</strong> <span id="payment-recipient" style="font-size: 11px; word-break: break-all;">-</span></div>
+                    </div>
+                </div>
+                
+                <button id="make-payment-btn" class="try-it" style="width: 100%; text-decoration: none; text-align: center; cursor: pointer; border: none; font-size: 16px; background: linear-gradient(135deg, #10b981 0%, #059669 100%);">
+                    💸 Make Payment & Access Endpoint
+                </button>
+                
+                <div id="payment-result" style="margin-top: 20px; display: none;">
+                    <div style="background: #1e1e1e; color: #d4d4d4; padding: 20px; border-radius: 8px; font-family: 'Monaco', monospace; font-size: 13px; max-height: 400px; overflow-y: auto;">
+                        <pre id="payment-result-content"></pre>
+                    </div>
+                </div>
+            </div>
+            
+            <div id="install-phantom" style="display: none; background: #fee2e2; border-left: 4px solid #ef4444; padding: 15px; border-radius: 8px; margin-top: 20px;">
+                <div style="font-weight: 600; color: #991b1b; margin-bottom: 5px;">⚠️ Phantom Wallet Not Detected</div>
+                <div style="color: #7f1d1d; font-size: 14px; margin-bottom: 10px;">
+                    Please install Phantom wallet to make Web3 payments.
+                </div>
+                <a href="https://phantom.app/" target="_blank" rel="noopener" style="color: #dc2626; text-decoration: underline;">
+                    Download Phantom Wallet →
+                </a>
+            </div>
+        </div>
+        
         <div class="footer">
             <p>Powered by <a href="/">X402 API Gateway</a> | Built with Express + Bun + PM2</p>
         </div>
     </div>
+    
+    <!-- Load wallet connector first (without Solana Web3.js to avoid conflicts) -->
+    <script src="/public/wallet-connector.js"></script>
+    <script>
+      console.log('✅ Wallet connector loaded');
+      console.log('Phantom available:', typeof window.solana !== 'undefined');
+    </script>
     
     <script>
         document.addEventListener('DOMContentLoaded', function() {
@@ -486,6 +551,144 @@ const data = await response.json();</pre>
                     }
                 }
             });
+            
+            // Wallet connector functionality
+            const connectBtn = document.getElementById('connect-phantom-btn');
+            const disconnectBtn = document.getElementById('disconnect-wallet-btn');
+            const statusText = document.getElementById('wallet-status-text');
+            const walletAddress = document.getElementById('wallet-address');
+            const paymentSection = document.getElementById('payment-section');
+            const installPhantom = document.getElementById('install-phantom');
+            const makePaymentBtn = document.getElementById('make-payment-btn');
+            const paymentResult = document.getElementById('payment-result');
+            const paymentResultContent = document.getElementById('payment-result-content');
+            
+            // Payment info will be populated from upstream's 402 response
+            let paymentInfo = null;
+            
+            // Check if Phantom is installed
+            function checkPhantom() {
+                if (!window.walletConnector.isPhantomInstalled()) {
+                    installPhantom.style.display = 'block';
+                    connectBtn.disabled = true;
+                    connectBtn.style.opacity = '0.5';
+                    connectBtn.style.cursor = 'not-allowed';
+                    return false;
+                }
+                return true;
+            }
+            
+            // Update UI based on wallet connection status
+            function updateWalletUI(connected) {
+                if (connected) {
+                    statusText.textContent = 'Connected';
+                    statusText.style.color = '#10b981';
+                    walletAddress.textContent = window.walletConnector.publicKey;
+                    connectBtn.style.display = 'none';
+                    disconnectBtn.style.display = 'block';
+                    paymentSection.style.display = 'block';
+                } else {
+                    statusText.textContent = 'Not Connected';
+                    statusText.style.color = '#666';
+                    walletAddress.textContent = '';
+                    connectBtn.style.display = 'block';
+                    disconnectBtn.style.display = 'none';
+                    paymentSection.style.display = 'none';
+                }
+            }
+            
+            // Connect wallet
+            connectBtn.addEventListener('click', async function() {
+                if (!checkPhantom()) return;
+                
+                connectBtn.disabled = true;
+                connectBtn.textContent = '🔄 Connecting...';
+                
+                console.log('🔄 Attempting to connect to Phantom wallet...');
+                
+                // Show diagnostics
+                const diagnostics = window.walletConnector.getDiagnostics();
+                console.log('Phantom Diagnostics:', diagnostics);
+                
+                const result = await window.walletConnector.connectPhantom();
+                
+                if (result.success) {
+                    updateWalletUI(true);
+                    console.log('✅ Wallet connected successfully');
+                } else {
+                    console.error('❌ Failed to connect:', result.error);
+                    
+                    // Show diagnostics in console for debugging
+                    if (result.details) {
+                        console.error('Connection error details:', result.details);
+                    }
+                    
+                    // Show user-friendly alert
+                    alert(result.error);
+                    
+                    connectBtn.disabled = false;
+                    connectBtn.textContent = '🔌 Connect Phantom Wallet';
+                }
+            });
+            
+            // Disconnect wallet
+            disconnectBtn.addEventListener('click', async function() {
+                await window.walletConnector.disconnect();
+                updateWalletUI(false);
+            });
+            
+            // Make payment
+            makePaymentBtn.addEventListener('click', async function() {
+                makePaymentBtn.disabled = true;
+                makePaymentBtn.textContent = '⏳ Processing Payment...';
+                paymentResultContent.textContent = 'Initiating payment...\\nPlease approve the transaction in your wallet...';
+                paymentResult.style.display = 'block';
+                
+                try {
+                    const result = await window.walletConnector.makeX402Request(
+                        '${endpoint.path}',
+                        paymentInfo,
+                        {
+                            method: '${getPrimaryMethod(endpoint.method)}',
+                            headers: {
+                                'Accept': 'application/json'
+                            }
+                        }
+                    );
+                    
+                    if (result.success) {
+                        paymentResultContent.textContent = 
+                            '✅ Payment Successful!\\n\\n' +
+                            'Transaction: ' + result.paymentSignature + '\\n' +
+                            'Amount: ' + result.paymentAmount + ' SOL\\n' +
+                            'Network: ' + paymentInfo.network + '\\n\\n' +
+                            '📡 API Response:\\n' +
+                            JSON.stringify(result.data, null, 2);
+                    } else {
+                        paymentResultContent.textContent = 
+                            '❌ Payment Failed\\n\\n' +
+                            'Error: ' + result.error;
+                    }
+                } catch (error) {
+                    paymentResultContent.textContent = 
+                        '❌ Error\\n\\n' + error.message;
+                } finally {
+                    makePaymentBtn.disabled = false;
+                    makePaymentBtn.textContent = '💸 Make Payment & Access Endpoint';
+                }
+            });
+            
+            // Wallet event handlers
+            window.walletConnector.onAccountChanged = function(publicKey) {
+                walletAddress.textContent = publicKey;
+            };
+            
+            window.walletConnector.onDisconnect = function() {
+                updateWalletUI(false);
+            };
+            
+            // Check Phantom on load
+            checkPhantom();
         });
     </script>
 </body>
@@ -518,6 +721,7 @@ export function generateAgentsListPage(agents, baseUrl = 'http://localhost:3000'
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/svg+xml" href="/favicon.ico">
     <title>Available Agents - X402 API Gateway</title>
     <style>
         * {
@@ -674,6 +878,7 @@ export function generateAgentDetailPage(agent, baseUrl = 'http://localhost:3000'
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/svg+xml" href="/favicon.ico">
     <title>${agent.name} - X402 API Gateway</title>
     <style>
         * {
